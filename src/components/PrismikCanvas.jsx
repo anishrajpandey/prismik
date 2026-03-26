@@ -1,4 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
+import * as tts from '@diffusionstudio/vits-web';
 
 const backendUrl = 'http://localhost:8000'; // Default, change if running on remote
 
@@ -19,6 +20,10 @@ export default function PrismikCanvas() {
   // Background check lock
   const isCheckingRef = useRef(false);
   const hasChangedRef = useRef(true);
+  const checkTimerRef = useRef(null); // Reference for 3-second inactivity timer
+  
+  // VITS Audio Player Ref
+  const audioRef = useRef(null);
 
   const drawNotebookBackground = (context, width, height) => {
     // Fill white/off-white background
@@ -76,11 +81,45 @@ export default function PrismikCanvas() {
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel(); // Stop talking on hot-reload/unmount
       }
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
     };
+  }, []);
+
+  // Pre-load voices to avoid delay on first TTS
+  useEffect(() => {
+    const preloadVoice = async () => {
+      try {
+        setTranscript('Downloading human voice model (~60MB), please wait...');
+        await tts.download('en_US-hfc_female-medium');
+        setTranscript('');
+      } catch (err) {
+        console.error("Failed to preload tts", err);
+        setTranscript('');
+      }
+    }
+    preloadVoice();
   }, []);
 
   const startDrawing = (e) => {
     if (!ctx) return;
+    
+    // Cancel the pending 3-second inactivity check since user is drawing again
+    if (checkTimerRef.current) {
+      clearTimeout(checkTimerRef.current);
+    }
+
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
+
+    setCurrentMessage('');
+    setIsInterrupting(false);
+
     setIsDrawing(true);
     ctx.beginPath();
     const { clientX, clientY } = e.touches ? e.touches[0] : e;
@@ -99,6 +138,14 @@ export default function PrismikCanvas() {
     setIsDrawing(false);
     ctx.closePath();
     hasChangedRef.current = true;
+
+    // Schedule check after 3 seconds of inactivity
+    if (checkTimerRef.current) {
+      clearTimeout(checkTimerRef.current);
+    }
+    checkTimerRef.current = setTimeout(() => {
+      performCanvasCheck();
+    }, 3000);
   };
 
   const getCanvasBlob = async () => {
@@ -114,19 +161,46 @@ export default function PrismikCanvas() {
   };
 
   // TTS Helper
-  const speakText = (text) => {
+  const speakText = async (text) => {
     if ('speechSynthesis' in window) {
-      window.speechSynthesis.cancel(); // Stop any current speech
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 1.0;
-      utterance.pitch = 1.0;
-      window.speechSynthesis.speak(utterance);
+      window.speechSynthesis.cancel(); // Stop any current native speech
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
+
+    try {
+      const wav = await tts.predict({
+        text: text,
+        voiceId: 'en_US-hfc_female-medium',
+      });
+      const audio = new Audio();
+      audio.src = URL.createObjectURL(wav);
+      audioRef.current = audio;
+      audio.play();
+    } catch (e) {
+      console.error("VITS TTS Error:", e);
+      // Fallback
+      if ('speechSynthesis' in window) {
+        const utterance = new SpeechSynthesisUtterance(text);
+        window.speechSynthesis.speak(utterance);
+      }
     }
   };
 
   // STT Handlers
   const handleTalk = () => {
     if (!agentEnabled) return;
+
+    // Immediately stop voice when starting to talk
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    if (audioRef.current) {
+      audioRef.current.pause();
+    }
+    setCurrentMessage('');
+    setIsInterrupting(false);
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -192,46 +266,42 @@ export default function PrismikCanvas() {
     recognition.start();
   };
 
-  // 5-second polling loop
-  useEffect(() => {
-    const timer = setInterval(async () => {
-      if (isCheckingRef.current) return;
-      if (!hasChangedRef.current) return; // Skip if no new user edits!
-      
-      isCheckingRef.current = true;
-      try {
-        const blob = await getCanvasBlob();
-        if (blob) {
-          hasChangedRef.current = false; // reset flag upon capture
-          const formData = new FormData();
-          formData.append('canvasImage', blob, 'canvas.jpg');
+  // Canvas Safety Check
+  const performCanvasCheck = async () => {
+    if (isCheckingRef.current) return;
+    if (!hasChangedRef.current) return; // Skip if no new user edits!
+    
+    isCheckingRef.current = true;
+    try {
+      const blob = await getCanvasBlob();
+      if (blob) {
+        hasChangedRef.current = false; // reset flag upon capture
+        const formData = new FormData();
+        formData.append('canvasImage', blob, 'canvas.jpg');
 
-          const response = await fetch(`${backendUrl}/analyze-image`, {
-            method: 'POST',
-            body: formData,
-          });
-          const data = await response.json();
-          
-          if (data.action === 'interrupt' && data.message) {
-            setIsInterrupting(true);
-            setCurrentMessage(`INTERRUPTION: ${data.message}`);
-            speakText(data.message);
-            // Auto hide interruption message after some time
-            setTimeout(() => {
-              setIsInterrupting(false);
-              setCurrentMessage('');
-            }, 8000);
-          }
+        const response = await fetch(`${backendUrl}/analyze-image`, {
+          method: 'POST',
+          body: formData,
+        });
+        const data = await response.json();
+        
+        if (data.action === 'interrupt' && data.message) {
+          setIsInterrupting(true);
+          setCurrentMessage(`INTERRUPTION: ${data.message}`);
+          speakText(data.message);
+          // Auto hide interruption message after some time
+          setTimeout(() => {
+            setIsInterrupting(false);
+            setCurrentMessage('');
+          }, 8000);
         }
-      } catch (err) {
-        console.error("Safety check error:", err);
-      } finally {
-        isCheckingRef.current = false;
       }
-    }, 5000);
-
-    return () => clearInterval(timer);
-  }, []);
+    } catch (err) {
+      console.error("Safety check error:", err);
+    } finally {
+      isCheckingRef.current = false;
+    }
+  };
 
 
   return (
@@ -259,8 +329,12 @@ export default function PrismikCanvas() {
                   if ('speechSynthesis' in window) {
                     window.speechSynthesis.cancel();
                   }
+                  if (audioRef.current) {
+                    audioRef.current.pause();
+                  }
                   setCurrentMessage('');
                   setIsInterrupting(false);
+                  hasChangedRef.current = false;
                 }}
                 className="ml-4 bg-white/20 hover:bg-white/30 text-white rounded-full p-2 focus:outline-none transition-colors"
                 title="Stop speaking"
