@@ -22,6 +22,10 @@ from google.genai import types
 # Will pick up GEMINI_API_KEY from environment
 client = genai.Client()
 
+@app.get("/")
+def read_root():
+    return {"message": "Prismik Backend is Running"}    
+
 @app.post("/ask")
 async def ask_agent(
     questionText: str = Form(...),
