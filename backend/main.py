@@ -33,7 +33,7 @@ async def ask_agent(
 ):
     """
     Called when the user speaks to the tutor.
-    Returns: { "answerText": "..." }
+    Returns: { "": "..." }
     """
     image_bytes = await canvasImage.read()
     
