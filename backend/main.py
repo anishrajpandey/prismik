@@ -32,7 +32,6 @@ async def ask_agent(
     canvasImage: UploadFile = File(...)
 ):
     """
-    Called when the user speaks to the tutor.
     Returns: { "": "..." }
     """
     image_bytes = await canvasImage.read()
